@@ -2,6 +2,14 @@ import {fetchRemote} from './safe-fetch.mjs';
 import {validMint} from './store.mjs';
 import {rateRetryAt} from './metadata.mjs';
 const num=x=>typeof x==='number'&&Number.isFinite(x)&&x>=0?x:null;
+// Authored contract for fields consumed by DIFF; this validates shape, not market truth.
+function validateMarketFields(pairs,mints){
+ for(const p of pairs){
+  if(p?.chainId!=='solana'||!mints.includes(p.baseToken?.address)||!validMint(p.pairAddress))continue;
+  for(const field of ['marketCap','fdv'])if(p[field]!=null&&num(p[field])===null)throw new Error('Invalid market payload field: '+field);
+  if(p.priceUsd!=null&&(typeof p.priceUsd!=='string'||! /^(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(p.priceUsd)||num(Number(p.priceUsd))===null))throw new Error('Invalid market payload field: priceUsd');
+ }
+}
 export function selectMarket(pairs,mint){
  const valid=pairs.filter(p=>p?.chainId==='solana'&&p.baseToken?.address===mint&&validMint(p.pairAddress));
  valid.sort((a,b)=>(num(b.liquidity?.usd)??-1)-(num(a.liquidity?.usd)??-1)||(num(b.volume?.h24)??0)-(num(a.volume?.h24)??0));
@@ -38,7 +46,7 @@ export class Market{
    const mints=this.batch();if(!mints.length){this.db.prepare("UPDATE market_control SET next_at=?,reason='idle' WHERE id=1").run(this.now()+1000);this.error=null;return}
    this.db.prepare('UPDATE market_control SET next_at=?,reason=? WHERE id=1').run(this.now()+(this.observed.size?5000:30000),this.observed.size?'active':'background');
    let pairs;
-   try{const result=await this.fetcher('https://api.dexscreener.com/tokens/v1/solana/'+mints.join(','),'market',{maxRedirects:0});pairs=JSON.parse(result.body.toString());if(!Array.isArray(pairs))throw new Error('Unexpected market response')}
+   try{const result=await this.fetcher('https://api.dexscreener.com/tokens/v1/solana/'+mints.join(','),'market',{maxRedirects:0});pairs=JSON.parse(result.body.toString());if(!Array.isArray(pairs))throw new Error('Unexpected market response');validateMarketFields(pairs,mints)}
    catch(error){
     const now=this.now();this.failures++;this.error=String(error.message).slice(0,160);
     this.retryAt=error.status===429?Math.max(now+30000,rateRetryAt(error)):error.status===403?now+3600000:now+Math.min(300000,30000*2**Math.min(this.failures-1,4));

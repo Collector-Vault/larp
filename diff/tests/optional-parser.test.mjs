@@ -1,0 +1,25 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {parseWebsite} from '../optional-parser.mjs';
+import {TechChecks} from '../tech.mjs';
+import {Store} from '../store.mjs';
+import {Metadata} from '../metadata.mjs';
+const source='https://example.com/';
+const output={source,title:'Plain title',description:'Website claim',selectors:{title:'title::text',description:'meta[name="description"]::attr(content)'}};
+const run=code=>(exe,args,options)=>{assert.equal(options.shell,false);assert.equal(options.windowsHide,true);assert.equal(args[0],'-I');return spawn(process.execPath,['-e',code],options)};
+const options=code=>({executable:process.execPath,spawnProcess:run(code),timeoutMs:2000});
+test('disabled or relative executable never spawns',async()=>{for(const executable of ['', 'python'])assert.equal(await parseWebsite('<title>x</title>',source,{executable,spawnProcess:()=>assert.fail('must not spawn')}),null)});
+test('bounded supplied HTML produces only attributed website metadata',async()=>{const result=await parseWebsite('<title>Plain title</title>',source,options(`process.stdin.resume();process.stdin.on('end',()=>console.log(${JSON.stringify(JSON.stringify(output))}));`));assert.equal(result.title,'Plain title');assert.equal(result.description,'Website claim');assert.equal(result.status,'unverified');assert.equal(result.source,source);assert.equal(result.parser,'Scrapling 0.5');});
+test('oversized HTML never starts the child',async()=>{assert.equal(await parseWebsite('x'.repeat(131073),source,{executable:process.execPath,spawnProcess:()=>assert.fail('oversized input spawned')}),null)});
+test('missing executable and early child exit safely return null',async()=>{assert.equal(await parseWebsite('x',source,{executable:process.execPath+'.missing'}),null);assert.equal(await parseWebsite('x'.repeat(131072),source,options('process.exit(1)')),null)});
+test('timeout and excessive stdout terminate parser with fallback',async()=>{for(const code of ['setInterval(()=>{},1000)','process.stdout.write("x".repeat(9000));setInterval(()=>{},1000)'])assert.equal(await parseWebsite('x',source,{...options(code),timeoutMs:500}),null)});
+test('invalid JSON, source substitution, selector changes and verdict injection are rejected',async()=>{for(const value of ['bad',{...output,source:'https://other.example/'},{...output,status:'verified'},{...output,selectors:{title:'script',description:'anything'}},{...output,title:42}])assert.equal(await parseWebsite('x',source,options(`process.stdin.resume();process.stdin.on('end',()=>console.log(${JSON.stringify(typeof value==='string'?value:JSON.stringify(value))}));`)),null)});
+test('markup and control characters remain plain unverified text',async()=>{const value={...output,title:'<script>doThing()</script>\u202e title',description:'<img src=x onerror=bad> claim'};const result=await parseWebsite('x',source,options(`process.stdin.resume();process.stdin.on('end',()=>console.log(${JSON.stringify(JSON.stringify(value))}));`));assert.doesNotMatch(result.title,/[<>\u202e]/);assert.doesNotMatch(result.description,/[<>]/);});
+test('optional parser enriches only website evidence and failure preserves built-in observation',async t=>{
+ const s=new Store(':memory:');t.after(()=>s.close());const m=new Metadata(s),mint='P'.repeat(32);const p={description:'Our software API.',links:[{label:'Website',url:source}]};
+ const parserOptions=options(`process.stdin.resume();process.stdin.on('end',()=>console.log(${JSON.stringify(JSON.stringify(output))}));`);
+ const tech=new TechChecks(m,{fetcher:async()=>({url:source,body:Buffer.from('<title>Fallback title</title>')}),parserOptions});tech.enqueue(mint,p);await tech.tick();
+ let result=tech.get(mint,p);assert.equal(result.observation.parserEvidence.description,'Website claim');assert.equal(result.observation.kind,'website_response');assert.equal(result.status,'unverified');assert.equal(result.color,'gray');assert.equal(result.functional.status,'unsupported');
+ parserOptions.executable=process.execPath+'.missing';parserOptions.spawnProcess=spawn;s.db.prepare('UPDATE tech_checks SET next_try=1').run();await tech.tick();result=tech.get(mint,p);assert.equal(result.observation.title,'Fallback title');assert.equal(result.observation.parserEvidence,undefined);assert.equal(result.status,'unverified');
+});

@@ -8,6 +8,9 @@ data/
 *.log
 *.pid
 node_modules/
+__pycache__/
+*.pyc
+.venv/
 coverage/
 .cache/
 *.zip

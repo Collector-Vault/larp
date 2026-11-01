@@ -1,5 +1,5 @@
 import https from 'node:https';
-import {resolve4} from 'node:dns/promises';
+import dns from 'node:dns/promises';
 import {isIP} from 'node:net';
 
 export function safeUrl(value) {
@@ -43,6 +43,13 @@ export function validateBody(body,contentType,kind) {
  }
  return {body,type};
 }
+// Use the OS resolver (including its configured network path), but remain IPv4-only.
+// Validate every answer before transport; never let HTTPS perform a second DNS lookup.
+async function resolveIPv4(host) {
+ const entries=await dns.lookup(host,{family:4,all:true});
+ if(!Array.isArray(entries)||entries.some(entry=>entry?.family!==4))throw new Error('DNS did not return only IPv4 addresses');
+ return entries.map(entry=>entry.address);
+}
 async function boundedResolve(host,resolve,timeoutMs) {
  let timer;try{return await Promise.race([resolve(host),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('DNS lookup timed out')),timeoutMs)})])}finally{clearTimeout(timer)}
 }
@@ -63,7 +70,7 @@ function requestBytes(url,address,kind,{request=https.request,timeoutMs=10000}={
   req.on('error',reject);req.on('close',()=>clearTimeout(timer));req.end();
  });
 }
-export async function fetchRemote(value,kind,{resolve=resolve4,request=https.request,reserve=()=>{},timeoutMs=10000,maxRedirects=3}={}) {
+export async function fetchRemote(value,kind,{resolve=resolveIPv4,request=https.request,reserve=()=>{},timeoutMs=10000,maxRedirects=3}={}) {
  let url=safeUrl(value);
  const deadline=performance.now()+timeoutMs;
  const remaining=()=>{const ms=deadline-performance.now();if(ms<=0)throw new Error('Request timed out');return ms};
