@@ -50,7 +50,7 @@ function requestBytes(url,address,kind,{request=https.request,timeoutMs=10000}={
  return new Promise((resolve,reject)=>{
   const req=request(url,{method:'GET',agent:false,headers:{Accept:kind==='html'?'text/html':(kind==='json'||kind==='market')?'application/json, text/plain':'image/png,image/jpeg,image/webp,image/gif','Accept-Encoding':'identity','User-Agent':'DIFF-local/1.1'},lookup:(host,options,callback)=>callback(null,options?.all?[{address,family:4}]:address,4)},res=>{
    const status=res.statusCode;
-   if([301,302,303,307,308].includes(status)){res.destroy();resolve({redirect:res.headers.location});return}
+   if([301,302,303,307,308].includes(status)){res.destroy();if(typeof res.headers.location!=='string'||!res.headers.location.trim()){reject(new Error('Redirect missing Location'));return}resolve({redirect:res.headers.location});return}
    if(status!==200){res.destroy();const error=new Error(`Source HTTP ${status}`);error.status=status;error.retryAfter=res.headers['retry-after'];error.host=url.hostname;reject(error);return}
    if(res.headers['content-encoding']&&res.headers['content-encoding']!=='identity'){res.destroy();reject(new Error('Compressed responses are not supported'));return}
    if(Number(res.headers['content-length'])>limits[kind]){res.destroy();reject(new Error('Response exceeds size limit'));return}
@@ -65,12 +65,14 @@ function requestBytes(url,address,kind,{request=https.request,timeoutMs=10000}={
 }
 export async function fetchRemote(value,kind,{resolve=resolve4,request=https.request,reserve=()=>{},timeoutMs=10000,maxRedirects=3}={}) {
  let url=safeUrl(value);
+ const deadline=performance.now()+timeoutMs;
+ const remaining=()=>{const ms=deadline-performance.now();if(ms<=0)throw new Error('Request timed out');return ms};
  for(let hop=0;hop<=maxRedirects;hop++){
   try {
   if(/(^|\.)(github\.com|githubusercontent\.com|github\.io|githubassets\.com)$/.test(url.hostname))throw new Error('GitHub access disabled for this app');
-  reserve(url.href);const addresses=await boundedResolve(url.hostname,resolve,timeoutMs);
+  reserve(url.href);const addresses=await boundedResolve(url.hostname,resolve,remaining());
   if(!addresses.length||addresses.some(ip=>!isPublicIPv4(ip)))throw new Error('Host resolves to a private or non-public address');
-  const result=await requestBytes(url,addresses[0],kind,{request,timeoutMs});
+  const result=await requestBytes(url,addresses[0],kind,{request,timeoutMs:remaining()});
   if(!result.redirect)return {...result,url:url.href};
   if(hop===maxRedirects)throw new Error('Too many redirects');
   url=safeUrl(new URL(result.redirect,url).href);

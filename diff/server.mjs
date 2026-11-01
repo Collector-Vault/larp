@@ -22,8 +22,8 @@ export function createApp(store,feed,metadata=null,tech=null,market=null,wallets
   if(!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host))return json(403,{error:'Local access only'});
   res.setHeader('X-Content-Type-Options','nosniff');
   res.setHeader('Content-Security-Policy',"default-src 'self'; connect-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
-  const url=new URL(req.url,`http://${host}`);
   try {
+  const url=new URL(req.url,`http://${host}`);
    if(req.method==='GET'&&url.pathname==='/api/status')return json(200,{feed:feed.status,stats:store.stats(),scanner:metadata?{...metadata.scanSummary(),websiteActive:tech?.current||null}:null,market:market?.summary(),alternativeMarket:alternative?.summary(),mintControls:mintControls?.summary(),solanaRpc:sharedRpc?.summary(),serverTime:Date.now(),coverage:'PumpPortal new-token and migration events only. Offline periods are not backfilled.'});
    if(req.method==='GET'&&url.pathname==='/api/events'){
     const {events,page}=store.listPage({q:url.searchParams.get('q')||'',kind:url.searchParams.get('kind')||'',watch:url.searchParams.get('watch')==='1',offset:Number(url.searchParams.get('offset')||0)});

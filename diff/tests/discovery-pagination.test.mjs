@@ -46,3 +46,27 @@ test('a query switch supersedes pending navigation and remains refreshable',asyn
  assert.equal(ui.context.pageState().pageInfo.offset,0);assert.equal(ui.context.pageState().rawEvents[0].id,8);ui.poll();await ui.ready();assert.deepEqual(requests.at(-1),{offset:0,q:'changed'});
  release();await navigation;assert.equal(ui.context.pageState().pageInfo.offset,0);assert.equal(ui.context.pageState().rawEvents[0].id,8);
 });
+
+test('slow automatic refresh is not superseded by the next polling tick',async()=>{
+ let release,hold=false,calls=0;const ui=uiHarness(()=>{calls++;return hold?new Promise(resolve=>{release=()=>resolve(pageResult(0,7))}):pageResult(0)});
+ await ui.ready();hold=true;ui.poll();await ui.ready();ui.poll();await ui.ready();
+ assert.equal(calls,2,'only initial load and one pending refresh');release();await ui.ready();assert.equal(ui.context.pageState().rawEvents[0].id,7);
+});
+test('pausing invalidates a pending refresh and resuming permits new data',async()=>{
+ let release,hold=false;const ui=uiHarness(()=>hold?new Promise(resolve=>{release=()=>resolve(pageResult(0,7))}):pageResult(0));
+ await ui.ready();hold=true;ui.poll();await ui.ready();ui.el('#pause').onclick();release();await ui.ready();
+ assert.equal(ui.context.pageState().rawEvents[0].id,0,'pending response must not update paused view');
+ hold=false;ui.el('#pause').onclick();await ui.ready();assert.equal(ui.el('#pause').textContent,'Pause view');
+});
+
+test('failed automatic refresh releases its guard for the next tick',async()=>{
+ let fail=false,calls=0;const ui=uiHarness(()=>{calls++;if(fail)throw new Error('offline');return pageResult(0,calls)});
+ await ui.ready();fail=true;ui.poll();await ui.ready();fail=false;ui.poll();await ui.ready();
+ assert.equal(calls,3);assert.equal(ui.context.pageState().rawEvents[0].id,3);
+});
+test('explicit navigation supersedes a slow automatic refresh without losing its guard',async()=>{
+ let release,hold=false;const ui=uiHarness(url=>{const offset=Number(url.searchParams.get('offset'));return hold&&offset===0?new Promise(resolve=>{release=()=>resolve(pageResult(0,7))}):pageResult(offset,8)});
+ await ui.ready();hold=true;ui.poll();await ui.ready();await ui.el('#page-older').onclick();
+ release();await ui.ready();assert.equal(ui.context.pageState().pageOffset,200);assert.equal(ui.context.pageState().rawEvents[0].id,8);
+ ui.poll();await ui.ready();assert.equal(ui.context.pageState().pageOffset,200);
+});
