@@ -1,0 +1,14 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {Store} from '../store.mjs';
+const mint='A'.repeat(32);
+const event={mint,txType:'create',signature:'sig1',name:'Test token',symbol:'TEST',marketCapSol:42,solAmount:0};
+test('rejects malformed events and paid trade events',()=>{const s=new Store(':memory:');for(const e of [{},null,{...event,mint:'../x'},{...event,txType:'buy'}])assert.equal(s.ingest(e,1000),false);assert.equal(s.stats(1000).total,0);s.close()});
+test('deduplicates create events while preserving first receipt',()=>{const s=new Store(':memory:');assert.equal(s.ingest(event,1000),true);assert.equal(s.ingest(event,2000),false);assert.equal(s.list({})[0].receivedAt,1000);assert.equal(s.stats(2000).total,1);s.close()});
+test('rolling hour excludes old and future records',()=>{const s=new Store(':memory:');s.ingest(event,1000);s.ingest({...event,mint:'B'.repeat(32)},3601001);assert.equal(s.stats(3601000).hour,1);assert.equal(s.stats(3601002).hour,1);s.close()});
+test('persists history, watchlist and hourly totals on restart',()=>{const dir=mkdtempSync(join(tmpdir(),'diff-test-'));try{let s=new Store(join(dir,'test.sqlite'));s.ingest(event,1000);s.setWatch(mint,true);s.close();s=new Store(join(dir,'test.sqlite'));assert.equal(s.stats(2000).hour,1);assert.equal(s.list({watch:true})[0].mint,mint);s.setWatch(mint,false);assert.equal(s.list({watch:true}).length,0);s.close()}finally{rmSync(dir,{recursive:true})}});
+test('search and migration filter preserve evidence',()=>{const s=new Store(':memory:');s.ingest(event,1000);s.ingest({mint,txType:'migration',signature:'sig2'},2000);assert.equal(s.list({q:'test'}).length,2);assert.equal(s.list({kind:'migration'})[0].raw.signature,'sig2');assert.equal(s.list({q:'not found'}).length,0);s.close()});
+test('missing numeric data stays null and zero remains zero',()=>{const s=new Store(':memory:');s.ingest({...event,marketCapSol:undefined},1000);const r=s.list({})[0];assert.equal(r.marketCapSol,null);assert.equal(r.solAmount,0);s.close()});

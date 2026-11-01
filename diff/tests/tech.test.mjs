@@ -1,0 +1,31 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {findTechClaims,inspectPage,TechChecks} from '../tech.mjs';
+import {Store} from '../store.mjs';
+import {Metadata} from '../metadata.mjs';
+const mint='C'.repeat(32);
+test('meme name and AI buzzword alone do not identify tech',()=>{
+ for(const text of [null,'A cute cat meme.','An AI cat on Solana.','No utility. Just vibes.'])assert.deepEqual(findTechClaims(text),[]);
+ assert.equal(findTechClaims('Our SDK provides a public data API for developers.').length,1);
+});
+test('HTML inspection extracts plain title without executing scripts',()=>{
+ const result=inspectPage('<title>Tool &amp; API</title><script>alert(1)</script>','https://example.com');assert.equal(result.title,'Tool & API');assert.equal(result.kind,'website_response');assert.ok(!JSON.stringify(result).includes('alert'));
+});
+test('reachable technical website stays unverified; missing repo is not fake',async()=>{
+ const store=new Store(':memory:');store.ingest({mint,txType:'create',uri:'https://example.com/meta'});const metadata=new Metadata(store);const tech=new TechChecks(metadata,{fetcher:async u=>({body:Buffer.from('<title>Working API platform</title>'),url:u,type:'text/html'})});const p={description:'Our software provides an API.',links:[{label:'Website',url:'https://example.com'}]};tech.enqueue(mint,p);await tech.tick();const status=tech.get(mint,p);assert.equal(status.status,'unverified');assert.equal(status.candidate,true);assert.equal(status.observation.title,'Working API platform');assert.equal(status.color,'gray');store.close();
+});
+test('outages, missing links and marketing claims cannot produce red or green',async()=>{
+ const store=new Store(':memory:');const metadata=new Metadata(store);const tech=new TechChecks(metadata,{fetcher:async()=>{throw new Error('HTTP 404')}});const p={description:'Our verified audited software is the best.',links:[]};tech.enqueue(mint,p);assert.equal(tech.get(mint,p).color,'gray');p.links=[{label:'Website',url:'https://example.com'}];tech.enqueue(mint,p);await tech.tick();assert.equal(tech.get(mint,p).status,'unverified');assert.ok(tech.get(mint,p).observation.error);store.close();
+});
+test('stale observations are explicitly stale and token metadata cannot inject verdicts',async()=>{
+ const store=new Store(':memory:');const metadata=new Metadata(store);const tech=new TechChecks(metadata);const p={description:'We build a developer API.',links:[],verified:true,status:'green',evidence:{working:true}};const result=tech.get(mint,p);assert.equal(result.status,'unverified');assert.equal(result.checkedAt,null);store.close();
+});
+test('changed or removed website invalidates old observations and queued checks',async()=>{
+ const store=new Store(':memory:');const metadata=new Metadata(store);const tech=new TechChecks(metadata,{fetcher:async u=>({body:Buffer.from('<title>Old site</title>'),url:u})});const p={description:'Our software builds APIs.',links:[{label:'Website',url:'https://one.example'}]};tech.enqueue(mint,p);await tech.tick();assert.ok(tech.get(mint,p).observation);p.links[0].url='https://two.example';tech.enqueue(mint,p);assert.equal(tech.get(mint,p).observation,null);assert.equal(tech.get(mint,p).checkedAt,null);p.links=[];tech.enqueue(mint,p);assert.equal(tech.db.prepare('SELECT COUNT(*) n FROM tech_checks').get().n,0);store.close();
+});
+test('tech host cooldown honors long Retry-After and stale observations are marked',async()=>{
+ const store=new Store(':memory:');const metadata=new Metadata(store);const tech=new TechChecks(metadata,{fetcher:async()=>{const e=new Error('Source HTTP 429');Object.assign(e,{status:429,retryAfter:'86400',host:'example.com'});throw e}});const p={description:'Our SDK provides an API.',links:[{label:'Website',url:'https://example.com'}]};tech.enqueue(mint,p);await tech.tick();assert.ok(tech.db.prepare('SELECT retry_at FROM metadata_hosts').get().retry_at-Date.now()>86399000);tech.db.prepare('UPDATE tech_checks SET checked=?').run(Date.now()-86400001);assert.equal(tech.get(mint,p).stale,true);store.close();
+});
+test('quota wait preserves previous website evidence without a fictitious fetch',async()=>{const s=new Store(':memory:');const m=new Metadata(s);let calls=0;const tech=new TechChecks(m,{fetcher:async u=>{calls++;return {body:Buffer.from('<title>Earlier observation</title>'),url:u}}});const p={description:'Software API.',links:[{label:'Website',url:'https://example.com'}]};tech.enqueue(mint,p);await tech.tick();s.db.prepare('UPDATE tech_checks SET next_try=?').run(Date.now()-1000);for(let i=0;i<12;i++)m.reserve();const before=s.db.prepare('SELECT COUNT(*) n FROM scan_activity').get().n;await tech.tick();assert.equal(calls,1);assert.equal(tech.get(mint,p).observation.title,'Earlier observation');assert.equal(s.db.prepare('SELECT COUNT(*) n FROM scan_activity').get().n,before);s.close()});
+test('due website retries precede newly arriving checks and failure retains last success',async()=>{const s=new Store(':memory:');const m=new Metadata(s);const seen=[];let fail=false;const tech=new TechChecks(m,{fetcher:async u=>{seen.push(u);if(fail)throw new Error('Network error');return {body:Buffer.from('<title>Prior evidence</title>'),url:u}}});const p={description:'Software API.',links:[{label:'Website',url:'https://older.example'}]};tech.enqueue(mint,p);await tech.tick();s.db.prepare('UPDATE tech_checks SET next_try=?').run(Date.now()-1000);tech.enqueue('D'.repeat(32),{...p,links:[{label:'Website',url:'https://new.example'}]});fail=true;await tech.tick();assert.equal(seen[1],'https://older.example/');assert.equal(tech.get(mint,p).lastSuccess.observation.title,'Prior evidence');s.close()});
+test('website cooldown backlog yields immediately to an eligible healthy host',async()=>{const s=new Store(':memory:');const m=new Metadata(s);const seen=[];const tech=new TechChecks(m,{fetcher:async u=>{seen.push(u);return {body:Buffer.from('<title>ok</title>'),url:u}}});for(const c of ['A','B','C','D'])tech.enqueue(c.repeat(32),{description:'Our software API.',links:[{label:'Website',url:c==='D'?'https://healthy.example':'https://blocked.example'}]});s.db.prepare('INSERT INTO metadata_hosts VALUES(?,?)').run('blocked.example',Date.now()+3600000);await tech.tick();assert.deepEqual(seen,['https://healthy.example/']);s.close()});

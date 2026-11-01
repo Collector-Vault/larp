@@ -1,0 +1,13 @@
+data/
+.env
+.env.*
+!.env.example
+*.sqlite*
+*.db
+*.db-*
+*.log
+*.pid
+node_modules/
+coverage/
+.cache/
+*.zip

@@ -1,0 +1,4 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {passesFees} from '../public/fees.js';
+const now=Date.now(),f={verified:true,metric:'cumulative-token-trading-fees',unit:'SOL',complete:true,source:'https://example.com/fees',checkedAt:now,value:0.1};
+test('fee threshold includes exactly 0.1 and above, excludes lower',()=>{assert.ok(passesFees(f,now));assert.ok(passesFees({...f,value:0.11},now));assert.equal(passesFees({...f,value:0.09999},now),false)});
+test('unknown stale partial creator network and estimated fee data cannot pass',()=>{for(const change of [{value:null},{value:NaN},{verified:false},{complete:false},{unit:'USD'},{metric:'creator-fees'},{metric:'network-fees'},{metric:'volume-estimate'},{checkedAt:now-90001},{checkedAt:now+1000},{source:null}])assert.equal(passesFees({...f,...change},now),false);assert.equal(passesFees(null,now),false)});

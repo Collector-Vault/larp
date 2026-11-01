@@ -1,0 +1,19 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {Store} from '../store.mjs';import {SharedRPC} from '../shared-rpc.mjs';
+const address='So11111111111111111111111111111111111111112';
+test('wallet and mint RPC calls share a FIFO five-second reservation',async()=>{const s=new Store(':memory:');let now=10000;const calls=[];const rpc=new SharedRPC(s,{now:()=>now,wait:async n=>{now+=n},transport:async(method)=>{calls.push({method,at:now});return {ok:true}}});await Promise.all([rpc.request('getSignaturesForAddress',address),rpc.request('getAccountInfo',address)]);assert.deepEqual(calls.map(x=>x.at),[10000,15000]);assert.equal(new SharedRPC(s,{now:()=>now}).summary().nextAt,20000);s.close()});
+test('shared429 cooldown persists and blocks both methods without fetching',async()=>{const s=new Store(':memory:');let calls=0;const rpc=new SharedRPC(s,{transport:async()=>{calls++;throw Object.assign(new Error('limited'),{status:429,retryAfter:'120'})}});await assert.rejects(rpc.request('getAccountInfo',address));await assert.rejects(rpc.request('getSignaturesForAddress',address),/cooldown/);assert.equal(calls,1);assert.ok(new SharedRPC(s).summary().cooldownUntil>Date.now()+119000);s.close()});
+test('unsupported methods and invalid public keys cannot send requests',async()=>{const s=new Store(':memory:');const rpc=new SharedRPC(s);await assert.rejects(rpc.request('sendTransaction',address));await assert.rejects(rpc.request('getAccountInfo','bad'));s.close()});
+import {Wallets} from '../wallets.mjs';import {WalletRPC} from '../wallet-rpc.mjs';
+for(const status of [403,429])test('composed RPC retains provider '+status+' after cooldown persistence fails',async t=>{
+ const s=new Store(':memory:');t.after(()=>s.close());let now=100000;t.mock.method(Date,'now',()=>now);const wallets=new Wallets(s);wallets.import(address);let calls=0;
+ const providerError=Object.assign(new Error('provider blocked'),{status,retryAfter:status===429?'7200':null});
+ const shared=new SharedRPC(s,{now:()=>now,wait:async ms=>{now+=ms},transport:async()=>{calls++;throw providerError}});
+ const db=shared.db;let writes=0;shared.db=new Proxy(db,{get(target,key){if(key==='prepare')return sql=>{if(sql.startsWith('UPDATE shared_rpc SET next_at')&&[2,3].includes(++writes))throw new Error('cooldown storage locked');return target.prepare(sql)};const value=target[key];return typeof value==='function'?value.bind(target):value}});
+ const wallet=new WalletRPC(wallets,{lookup:key=>shared.request('getSignaturesForAddress',key)});await wallet.tick();
+ const deadline=100000+(status===403?3600000:7200000);
+ assert.equal(providerError.retryAt,deadline,'provider error must retain its effective deadline');assert.equal(shared.summary().cooldownUntil,deadline);assert.equal(wallet.summary().nextAt,deadline);assert.match(shared.summary().error,/cooldown storage locked/);assert.equal(shared.summary().queued,0);
+ now=161000;await wallet.tick();assert.equal(calls,1,'wallet must not retry inside original provider cooldown');
+ await Promise.all([assert.rejects(shared.request('getAccountInfo',address),error=>error.deferred&&error.retryAt===deadline),assert.rejects(shared.request('getSignaturesForAddress',address),error=>error.deferred&&error.retryAt===deadline)]);
+ assert.equal(calls,1);assert.equal(shared.summary().queued,0);assert.equal(db.prepare('SELECT cooldown FROM shared_rpc WHERE id=1').get().cooldown,deadline,'transient persistence failure must be retried before queued work');assert.equal(new SharedRPC(s,{now:()=>now}).summary().cooldownUntil,deadline);
+ shared.db=db;shared.transport=async()=>{calls++;return []};now=deadline;await wallet.tick();assert.equal(calls,2);assert.equal(wallet.summary().error,null);assert.equal(shared.summary().error,null);assert.equal(wallets.list()[0].status,'checked');
+});
